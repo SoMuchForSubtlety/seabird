@@ -239,6 +239,13 @@ func (l *ListView) createColumn(name string, bind func(listitem *gtk.ListItem, o
 	column := gtk.NewColumnViewColumn(name, &factory.ListItemFactory)
 	column.SetResizable(true)
 	column.SetExpand(true)
+
+	itemExpr := gtk.NewPropertyExpression(gtk.GTypeListItem, nil, "item")
+	labelExpr := gtk.NewPropertyExpression(gtk.GTypeLabel, itemExpr, "label")
+	stringExpr := gtk.NewPropertyExpression(gtk.GTypeStringObject, labelExpr, "string")
+	sort := gtk.NewStringSorter(stringExpr)
+	column.SetSorter(&sort.Sorter)
+
 	return column
 }
 
