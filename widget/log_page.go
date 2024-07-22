@@ -1,7 +1,9 @@
 package widget
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -14,6 +16,7 @@ import (
 	"github.com/getseabird/seabird/internal/util"
 	"github.com/leaanthony/go-ansi-parser"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 )
 
 type LogPage struct {
@@ -43,34 +46,45 @@ func NewLogPage(ctx context.Context, cluster *api.Cluster, pod *corev1.Pod, cont
 	scrolledWindow.SetVExpand(true)
 	box.Append(scrolledWindow)
 
-	logs, err := podLogs(ctx, cluster, pod, container)
+	logCtx, cancel := context.WithCancel(ctx)
+	p.ConnectDestroy(func() {
+		cancel()
+	})
+	logs, err := podLogs(logCtx, cluster, pod, container)
 	if err != nil {
 		ShowErrorDialog(ctx, "Could not load logs", err)
 	} else {
-		if text, err := ansi.Parse(string(logs)); err != nil {
-			buffer.SetText(string(logs))
-		} else {
-			for _, text := range text {
-				var attr []string
-				if text.FgCol != nil {
-					attr = append(attr, fmt.Sprintf(`foreground="%s"`, text.FgCol.Hex))
+		scanner := bufio.NewScanner(logs)
+		go func() {
+			defer logs.Close()
+			for scanner.Scan() {
+				scanner.Err()
+				content := scanner.Text()
+				if text, err := ansi.Parse(content); err != nil {
+					buffer.SetText(content)
+				} else {
+					for _, text := range text {
+						var attr []string
+						if text.FgCol != nil {
+							attr = append(attr, fmt.Sprintf(`foreground="%s"`, text.FgCol.Hex))
+						}
+						if text.BgCol != nil {
+							attr = append(attr, fmt.Sprintf(`background="%s"`, text.BgCol.Hex))
+						}
+						buffer.InsertMarkup(buffer.EndIter(), fmt.Sprintf(`<span %s>%s</span>`, strings.Join(attr, " "), html.EscapeString(text.Label)))
+					}
 				}
-				if text.BgCol != nil {
-					attr = append(attr, fmt.Sprintf(`background="%s"`, text.BgCol.Hex))
-				}
-				buffer.InsertMarkup(buffer.EndIter(), fmt.Sprintf(`<span %s>%s</span>`, strings.Join(attr, " "), html.EscapeString(text.Label)))
 			}
-		}
+			if scanner.Err() != nil && !errors.Is(err, context.Canceled) {
+				ShowErrorDialog(ctx, "Could not scan for more logs", err)
+			}
+		}()
 	}
 
 	return &p
 }
 
-func podLogs(ctx context.Context, cluster *api.Cluster, pod *corev1.Pod, container string) ([]byte, error) {
-	req := cluster.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{Container: container})
-	r, err := req.Stream(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return io.ReadAll(r)
+func podLogs(ctx context.Context, cluster *api.Cluster, pod *corev1.Pod, container string) (io.ReadCloser, error) {
+	req := cluster.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{Container: container, Follow: true, SinceSeconds: ptr.To[int64](600)})
+	return req.Stream(ctx)
 }
